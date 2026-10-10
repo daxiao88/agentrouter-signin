@@ -2,20 +2,28 @@ name: Airouter Daily Signin
 
 on:
   schedule:
-    - cron: '30 17 * * *'
-  workflow_dispatch:
+    - cron: '30 17 * * *'   # UTC 17:30 = 北京次日 0:30 (早于本机 08:00)
+  workflow_dispatch:       # 手动触发按钮
 
 permissions:
   contents: write
 
+# 同一时间只跑一次，避免堆叠
+concurrency:
+  group: airouter-signin
+  cancel-in-progress: false
+
 jobs:
   signin:
     runs-on: ubuntu-latest
+    # 失败也继续（commit 台账 + 写日志），不让整个 workflow 卡死
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Run sign-in
         run: python airouter_daily.py
+        continue-on-error: true
         env:
           AGENTROUTER_BASE: https://ps.air-outer.com
           AGENTROUTER_USER: ${{ secrets.AGENTROUTER_USER }}
@@ -30,5 +38,6 @@ jobs:
             git commit -m "sign-in $(date +%Y-%m-%d)"
             git push
           }
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
