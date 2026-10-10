@@ -2,7 +2,7 @@ name: Airouter Daily Signin
 
 on:
   schedule:
-    - cron: '30 17 * * *'   # UTC 17:30 = 北京次日 0:30 (早于本机 08:00)
+    - cron: '30 17 * * *'
   workflow_dispatch:
 
 permissions:
