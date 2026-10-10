@@ -1,0 +1,61 @@
+{
+  "note": "agentrouter(air-outer) 每日签到台账。history=成功签到记录; known_missing=已知不可追溯缺天(统计汇总时扣除)。",
+  "site": "https://ps.air-outer.com (agentrouter)",
+  "checkin_credit_usd": 25,
+  "history": [
+    {
+      "date": "2026-10-04",
+      "checked_in": true,
+      "balance_usd": 1250.0,
+      "source": "cron-baseline",
+      "ts": "2026-10-04T08:00:00+08:00"
+    },
+    {
+      "date": "2026-10-05",
+      "checked_in": true,
+      "balance_usd": 1275.0,
+      "source": "cron-baseline",
+      "ts": "2026-10-05T16:02:00+08:00"
+    },
+    {
+      "date": "2026-10-06",
+      "checked_in": true,
+      "balance_usd": 1300.0,
+      "source": "cron-08:03",
+      "ts": "2026-10-06T09:30:08.588944",
+      "note": "今日已签到, 余额为 $1300.00 (每天增长 +$25.00)"
+    },
+    {
+      "date": "2026-10-09",
+      "checked_in": true,
+      "balance_usd": 1350.0,
+      "source": "airouter_daily.py",
+      "ts": "2026-10-09T21:33:00.803732"
+    },
+    {
+      "date": "2026-10-10",
+      "checked_in": true,
+      "balance_usd": 1375.0,
+      "source": "airouter_daily.py",
+      "ts": "2026-10-10T08:43:33.008501"
+    }
+  ],
+  "known_missing": [
+    {
+      "date": "2026-10-07",
+      "reason": "本机关机, cron 未跑, 离线损失",
+      "loss_usd": 25.0,
+      "recoverable": false,
+      "note": "airouter 只给当日 $25, 历史缺天不可追溯补签",
+      "recorded_ts": "2026-10-10T22:30:00+08:00"
+    },
+    {
+      "date": "2026-10-08",
+      "reason": "本机关机, cron 未跑, 离线损失",
+      "loss_usd": 25.0,
+      "recoverable": false,
+      "note": "airouter 只给当日 $25, 历史缺天不可追溯补签",
+      "recorded_ts": "2026-10-10T22:30:00+08:00"
+    }
+  ]
+}
