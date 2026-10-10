@@ -11,10 +11,6 @@ permissions:
 jobs:
   signin:
     runs-on: ubuntu-latest
-    notifications:
-      email:
-        participants: [all]
-        ignore_warnings: false
     steps:
       - uses: actions/checkout@v4
 
