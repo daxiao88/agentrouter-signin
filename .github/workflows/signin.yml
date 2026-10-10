@@ -1,0 +1,38 @@
+name: Airouter Daily Signin
+
+on:
+  schedule:
+    - cron: '30 17 * * *'   # UTC 17:30 = 北京次日 0:30 (早于本机 08:00)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  signin:
+    runs-on: ubuntu-latest
+    notifications:
+      email:
+        participants: [all]
+        ignore_warnings: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run sign-in
+        run: python airouter_daily.py
+        env:
+          AGENTROUTER_BASE: https://ps.air-outer.com
+          AGENTROUTER_USER: ${{ secrets.AGENTROUTER_USER }}
+          AGENTROUTER_PASS: ${{ secrets.AGENTROUTER_PASS }}
+
+      - name: Commit updated ledger
+        run: |
+          git config user.email "github-actions@airouter-signin"
+          git config user.name "airouter-signin"
+          git add ledger.json
+          git diff --quiet --cached || {
+            git commit -m "sign-in $(date +%Y-%m-%d)"
+            git push
+          }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
