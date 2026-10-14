@@ -9,18 +9,31 @@ import json, os, sys, datetime
 from curl_cffi import requests
 
 ENV = os.path.expanduser("~") + r"\AppData\Local\hermes\.env"
-BASE = "https://ps.air-outer.com"
+BASE = os.environ.get("AGENTROUTER_BASE", "https://ps.air-outer.com")
 LEDGER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agentrouter_checkin_ledger.json")
 CREDIT = 25.0
 IMPERSONATE = "chrome"  # curl_cffi 指纹：chrome / chrome124 / safari / edge 等
 
 def load_env():
+    """凭据：优先 os.environ（GitHub Actions secrets 注入），本机 .env 作回退。"""
     env = {}
-    for l in open(ENV, encoding="utf-8"):
-        l = l.rstrip("\r\n")
-        if "=" in l and not l.lstrip().startswith("#"):
-            k, v = l.split("=", 1)
-            env[k.strip()] = v.strip().strip('"').strip("'")
+    # 1) 环境变量优先
+    for k in ("AGENTROUTER_USER", "AGENTROUTER_PASS", "AGENTROUTER_BASE"):
+        v = os.environ.get(k)
+        if v:
+            env[k] = v
+    # 2) .env 回退（本机，GitHub runner 无此路径则跳过）
+    if os.path.exists(ENV):
+        try:
+            for l in open(ENV, encoding="utf-8"):
+                l = l.rstrip("\r\n")
+                if "=" in l and not l.lstrip().startswith("#"):
+                    k, v = l.split("=", 1)
+                    k = k.strip()
+                    if k not in env:  # 环境变量优先，.env 不覆盖
+                        env[k] = v.strip().strip('"').strip("'")
+        except Exception:
+            pass
     return env
 
 def load_ledger():
