@@ -1,124 +1,111 @@
 #!/usr/bin/env python3
-"""airouter 每日签到 + 台账（多域名回退 + 健壮响应解析）。
-凭据从 os.environ 读（workflow 注入 secrets）。
-域名策略：依次尝试 [国内域 ps.air-outer.com, 海外域 agentrouter.org]，
-  哪个能登录成功就用哪个；国内域常被阿里云 WAF 拦（返回 aliyun_waf HTML 页），
-  海外域 agentrouter.org 无 WAF，海外 runner 走它一般能拿到正常 JSON。
-每个响应先读文本、尝试 JSON 解析、失败则安全降级（不硬崩），并打印原文前 200 便于诊断。
+"""airouter 每日签到 + 台账 + 漏签检测（curl_cffi 版，绕过阿里云 WAF）。
+闭环：登录 → 登出 → 重登(触发当日 $25) → /api/user/self 读真余额 → 追加台账 → 漏签检测。
+每天 1 次、4 个 HTTP 调用，幂等可重跑。脚本级 cron 用。
+余额真相源：/api/user/self 的 quota ÷500000 = 美元（与 bsk 看板吻合，勿用登录返回的 quota=0）。
+依赖：curl_cffi>=0.15.0（pip install curl_cffi，Hermes venv 已装）。
 """
-import json, os, sys, urllib.request, urllib.error, http.cookiejar, ssl, datetime
+import json, os, sys, datetime
+from curl_cffi import requests
 
-# 多域回退（顺序=优先级）；可用环境变量 AGENTROUTER_BASES 覆盖（逗号分隔）
-DEFAULT_BASES = ["https://ps.air-outer.com", "https://agentrouter.org"]
-BASES = [b.strip() for b in os.environ.get("AGENTROUTER_BASES", ",".join(DEFAULT_BASES)).split(",") if b.strip()]
-U = os.environ.get("AGENTROUTER_USER", "")
-P = os.environ.get("AGENTROUTER_PASS", "")
-LEDGER = "ledger.json"
+ENV = os.path.expanduser("~") + r"\AppData\Local\hermes\.env"
+BASE = "https://ps.air-outer.com"
+LEDGER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agentrouter_checkin_ledger.json")
+CREDIT = 25.0
+IMPERSONATE = "chrome"  # curl_cffi 指纹：chrome / chrome124 / safari / edge 等
 
-def make_client():
-    ctx = ssl.create_default_context()
-    cj = http.cookiejar.CookieJar()
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj),
-                                       urllib.request.HTTPSHandler(context=ctx))
+def load_env():
+    env = {}
+    for l in open(ENV, encoding="utf-8"):
+        l = l.rstrip("\r\n")
+        if "=" in l and not l.lstrip().startswith("#"):
+            k, v = l.split("=", 1)
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
 
-def _post(op, base, path, body, timeout=40):
-    data = json.dumps(body).encode()
-    h = {"Content-Type": "application/json"}
-    r = urllib.request.Request(base + path, data=data, method="POST", headers=h)
-    return op.open(r, timeout=timeout).read().decode("utf-8", "replace")
+def load_ledger():
+    if os.path.exists(LEDGER):
+        return json.load(open(LEDGER, encoding="utf-8"))
+    return {"history": []}
 
-def _get(op, base, path, headers=None, timeout=40):
-    h = {"Content-Type": "application/json"}
-    h.update(headers or {})
-    r = urllib.request.Request(base + path, method="GET", headers=h)
-    return op.open(r, timeout=timeout).read().decode("utf-8", "replace")
+def save_ledger(L):
+    json.dump(L, open(LEDGER, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
-def _parse(raw):
-    try:
-        return json.loads(raw), raw
-    except Exception:
-        return None, raw
+def gap_days(history, today):
+    """返回连续漏签日期列表。history 日期升序。"""
+    dates = sorted({h["date"] for h in history} | {today})
+    gaps, prev = [], None
+    for d in dates:
+        dt = datetime.date.fromisoformat(d)
+        if prev and (dt - prev).days > 1:
+            cur = prev + datetime.timedelta(days=1)
+            while cur < dt:
+                gaps.append(cur.isoformat())
+                cur += datetime.timedelta(days=1)
+        prev = dt
+    return gaps
 
-def try_signin(base):
-    """在 base 上跑完整签到。成功返回 (True, 余额, 摘要)；失败返回 (False, 原因, 摘要)。"""
-    op = make_client()
+def main():
+    env = load_env()
+    U, P = env.get("AGENTROUTER_USER", ""), env.get("AGENTROUTER_PASS", "")
     today = datetime.date.today().isoformat()
 
+    # 统一 session（curl_cffi 自动处理 cookie）
+    s = requests.Session()
+    s.headers.update({"Content-Type": "application/json"})
+
+    def req(method, path, body=None):
+        url = BASE + path
+        data = json.dumps(body) if body is not None else None
+        r = s.request(method, url, data=data, impersonate=IMPERSONATE, timeout=40)
+        return r.status_code, r.json()
+
     # 1) 登录
-    raw = _post(op, base, "/api/user/login", {"username": U, "password": P})
-    j, _ = _parse(raw)
-    if j is None:
-        waf = "aliyun_waf" in raw[:500] or "<!doctype" in raw[:50].lower()
-        return False, f"登录返回非JSON{'(WAF拦截)' if waf else ''}", raw[:150].replace("\n", " ")
+    status, j = req("POST", "/api/user/login", {"username": U, "password": P})
     if not j.get("success"):
-        return False, f"登录失败: {j.get('message')}", j.get("message") or ""
+        print(f"[agentrouter {today}] API登录失败: {j.get('message')}")
+        return 1
     uid = j["data"]["id"]
 
     # 2) 登出
-    try: _get(op, base, "/api/user/logout")
-    except Exception: pass
+    try:
+        req("GET", "/api/user/logout")
+    except Exception:
+        pass
 
     # 3) 重登 (触发当日 $25 签到)
-    raw2 = _post(op, base, "/api/user/login", {"username": U, "password": P})
-    j2, _ = _parse(raw2)
-    if j2 is None:
-        return False, f"重登返回非JSON", raw2[:150].replace("\n", " ")
-    if not j2.get("success"):
-        return False, f"重登失败: {j2.get('message')}", j2.get("message") or ""
+    status, j = req("POST", "/api/user/login", {"username": U, "password": P})
+    if not j.get("success"):
+        print(f"[agentrouter {today}] 重登失败: {j.get('message')}")
+        return 1
 
-    # 4) /api/user/self 读真余额
-    op2 = make_client()
-    _post(op2, base, "/api/user/login", {"username": U, "password": P})  # 刷新 op2 会话
-    raw3 = _get(op2, base, "/api/user/self", headers={"New-Api-User": str(uid)})
-    j3, _ = _parse(raw3)
-    if j3 is None:
-        return False, f"self返回非JSON", raw3[:150].replace("\n", " ")
-    d = j3.get("data") or {}
-    balance_usd = round((d.get("quota") or 0) / 500000.0, 2)
+    # 4) /api/user/self 读真余额（带 New-Api-User header）
+    r = s.get(BASE + "/api/user/self", headers={"New-Api-User": str(uid)}, impersonate=IMPERSONATE, timeout=40)
+    d = r.json()["data"]
+    quota = d.get("quota") or 0
+    balance_usd = round(quota / 500000.0, 2)
 
-    # 5) 追加台账
-    L = {"history": []}
-    if os.path.exists(LEDGER):
-        try: L = json.load(open(LEDGER, encoding="utf-8"))
-        except Exception: L = {"history": []}
+    # 5) 追加台账 + 漏签检测
+    L = load_ledger()
     hist = L.get("history", [])
-    existing = next((h for h in hist if h.get("date") == today), None)
+    existing = next((h for h in hist if h["date"] == today), None)
     if existing:
         existing.update({"balance_usd": balance_usd, "ts": datetime.datetime.now().isoformat()})
     else:
         hist.append({"date": today, "checked_in": True, "balance_usd": balance_usd,
-                     "source": "github-actions", "ts": datetime.datetime.now().isoformat()})
+                     "source": "airouter_daily.py", "ts": datetime.datetime.now().isoformat()})
     L["history"] = hist
-    with open(LEDGER, "w", encoding="utf-8") as f:
-        json.dump(L, f, ensure_ascii=False, indent=2)
+    save_ledger(L)
 
-    hhmm = datetime.datetime.now().strftime("%H:%M")
-    return True, balance_usd, f"{base} 登录成功 余额${balance_usd}"
-
-def main():
-    if not U or not P:
-        print("[airouter] 缺少 AGENTROUTER_USER/PASS 环境变量"); return 1
-    today = datetime.date.today().isoformat()
-
-    last_fail = ""
-    for base in BASES:
-        try:
-            ok, bal, info = try_signin(base)
-        except urllib.error.HTTPError as e:
-            last_fail = f"{base}: HTTP {e.code}"
-            print(f"[airouter {today}] {last_fail} => 试下一域"); continue
-        except Exception as e:
-            last_fail = f"{base}: {type(e).__name__} {str(e)[:80]}"
-            print(f"[airouter {today}] {last_fail} => 试下一域"); continue
-        if ok:
-            print(f"[agentrouter {today} {datetime.datetime.now().strftime('%H:%M')}] 签到有效 | 余额 ${bal} | 使用域名 {base}")
-            return 0
-        else:
-            last_fail = f"{base}: {info}"
-            print(f"[airouter {today}] {base} 失败: {info} => 试下一域")
-
-    print(f"[agentrouter {today}] ⚠️ 所有域名({len(BASES)})均失败: {last_fail}")
-    return 1
+    # 6) 漏签提醒 + 报告 (含 签到时间 HH:MM 与 漏签日期)
+    gaps = gap_days(hist, today)
+    now = datetime.datetime.now()
+    hhmm = now.strftime("%H:%M")
+    gap_note = ""
+    if gaps:
+        gap_note = f" | 漏签日期: {','.join(gaps)}"
+    print(f"[agentrouter {today} {hhmm}] 签到有效 | 余额 ${balance_usd} | 本次签到时间 {hhmm}{gap_note}")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
